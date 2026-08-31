@@ -3,3 +3,5 @@ flask-cors
 requests
 beautifulsoup4
 gunicorn
+APScheduler==3.10.4
+pytz
