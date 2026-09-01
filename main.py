@@ -12,7 +12,7 @@ CORS(app)
 
 MM_TZ = pytz.timezone('Asia/Yangon')
 
-FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://your-project-id-default-rtdb.firebaseio.com/")
+FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://setlive-5e4e6-default-rtdb.firebaseio.com/")
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
 
@@ -89,51 +89,43 @@ def format_2d(set_val, val):
             "valFormatted": val_formatted
         }
     except Exception:
-        return {
-            "result2D": "--",
-            "setFormatted": "--",
-            "valFormatted": "--"
-        }
+        return None
 
-def fetch_official_2d_history():
-    """ Fetches real time-slot results from official 2D Myanmar API """
+def fetch_all_historical_results():
+    """ Tries to pull exact historical slot data from live 2d endpoints """
+    result_map = {}
     try:
         res = requests.get("https://live2d.2dmyanmar.com/api/live", timeout=5)
         if res.status_code == 200:
-            json_data = res.json()
-            result_map = {}
-            # Check for result objects in API response
-            result_list = json_data.get('result', [])
-            for item in result_list:
-                time_str = item.get('open_time', '')
+            data = res.json()
+            # Parse result list or live array structure
+            items = data.get('result', []) or data.get('live_2d', [])
+            for item in items:
+                time_str = str(item.get('open_time', '') or item.get('time', ''))
                 set_val = item.get('set', '')
                 val_val = item.get('val', '')
+                twod_val = item.get('twod', '')
                 
                 parsed = format_2d(set_val, val_val)
+                if not parsed and twod_val:
+                    parsed = {
+                        "result2D": str(twod_val),
+                        "setFormatted": str(set_val) if set_val else "--",
+                        "valFormatted": str(val_val) if val_val else "--"
+                    }
                 
-                if '11:00' in time_str:
-                    result_map['11'] = parsed
-                elif '12:01' in time_str or '12:00' in time_str:
-                    result_map['12'] = parsed
-                elif '15:00' in time_str or '14:30' in time_str:
-                    result_map['15'] = parsed
-                elif '16:30' in time_str or '16:00' in time_str:
-                    result_map['16'] = parsed
-            return result_map
+                if parsed:
+                    if '11:00' in time_str:
+                        result_map['11'] = parsed
+                    elif '12:01' in time_str or '12:00' in time_str:
+                        result_map['12'] = parsed
+                    elif '15:00' in time_str or '14:30' in time_str:
+                        result_map['15'] = parsed
+                    elif '16:30' in time_str or '16:00' in time_str:
+                        result_map['16'] = parsed
     except Exception as e:
-        print("Official API Fetch Error:", e)
-    return {}
-
-def force_capture_and_save(slot_key, history_data, official_results):
-    if slot_key in official_results and official_results[slot_key]["result2D"] != "--":
-        history_data[slot_key] = official_results[slot_key]
-    else:
-        # Fallback to current live SET data if official API item is missing
-        data = fetch_set_live_data()
-        set_item = data[0] if data else {"Last": "1,385.83", "Value": "45,123.83"}
-        parsed = format_2d(set_item.get('Last', '1,385.83'), set_item.get('Value', '45,123.83'))
-        history_data[slot_key] = parsed
-    save_firebase_history(history_data)
+        print("Historical Fetch Error:", e)
+    return result_map
 
 def sync_all_slots():
     now_mm = datetime.now(MM_TZ)
@@ -152,16 +144,42 @@ def sync_all_slots():
         save_firebase_history(history_data)
 
     time_mins = now_mm.hour * 60 + now_mm.minute
-    official_results = fetch_official_2d_history()
+    historical = fetch_all_historical_results()
 
+    # Slot update checks
+    updated = False
+    
+    # 11:00 AM Slot
     if time_mins >= 660 and not history_data.get("11"):
-        force_capture_and_save("11", history_data, official_results)
+        if '11' in historical:
+            history_data["11"] = historical['11']
+            updated = True
+            
+    # 12:01 PM Slot
     if time_mins >= 721 and not history_data.get("12"):
-        force_capture_and_save("12", history_data, official_results)
+        if '12' in historical:
+            history_data["12"] = historical['12']
+            updated = True
+
+    # 3:00 PM Slot
     if time_mins >= 900 and not history_data.get("15"):
-        force_capture_and_save("15", history_data, official_results)
+        if '15' in historical:
+            history_data["15"] = historical['15']
+            updated = True
+
+    # 4:30 PM Slot
     if time_mins >= 990 and not history_data.get("16"):
-        force_capture_and_save("16", history_data, official_results)
+        if '16' in historical:
+            history_data["16"] = historical['16']
+            updated = True
+        elif not history_data.get("16"): # Last slot live fallback
+            live = fetch_set_live_data()
+            set_item = live[0] if live else {"Last": "1,385.83", "Value": "45,123.83"}
+            history_data["16"] = format_2d(set_item.get('Last'), set_item.get('Value'))
+            updated = True
+
+    if updated:
+        save_firebase_history(history_data)
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 scheduler.add_job(sync_all_slots, 'interval', seconds=15)
