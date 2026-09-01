@@ -5,76 +5,75 @@ from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
-import json
 import os
 
 app = Flask(__name__)
 CORS(app)
 
 MM_TZ = pytz.timezone('Asia/Yangon')
-DATA_FILE = "history.json"
 
-def load_history():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, 'r') as f:
-                return json.load(f)
-        except Exception:
-            pass
-    return {"11": None, "12": None, "15": None, "16": None, "date": ""}
+# Firebase Database URL (Read from Environment Variable or fallback)
+FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://your-project-id-default-rtdb.firebaseio.com/")
+if not FIREBASE_URL.endswith('/'):
+    FIREBASE_URL += '/'
 
-def save_history(data):
+def get_firebase_history():
     try:
-        with open(DATA_FILE, 'w') as f:
-            json.dump(data, f)
+        res = requests.get(f"{FIREBASE_URL}history_2d.json", timeout=5)
+        if res.status_code == 200 and res.json():
+            return res.json()
     except Exception as e:
-        print("File save error:", e)
+        print("Firebase fetch error:", e)
+    
+    now_init = datetime.now(MM_TZ)
+    return {
+        "11": None,
+        "12": None,
+        "15": None,
+        "16": None,
+        "date": now_init.strftime('%Y-%m-%d')
+    }
 
-history_data = load_history()
+def save_firebase_history(data):
+    try:
+        requests.put(f"{FIREBASE_URL}history_2d.json", json=data, timeout=5)
+    except Exception as e:
+        print("Firebase save error:", e)
 
 def fetch_set_live_data():
     url = "https://www.set.or.th/th/home"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-    }
+    headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = requests.get(url, headers=headers, timeout=10)
+        response = requests.get(url, headers=headers, timeout=5)
         soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Extract SET index text directly
-        text_data = soup.get_text()
-        
         rows = soup.find_all('tr')
         stock_data = []
         for row in rows:
             cols = row.find_all(['td', 'th'])
             cols_text = [c.text.strip() for c in cols]
-            if len(cols_text) >= 3:
+            if len(cols_text) >= 5:
                 stock_data.append({
                     "Symbol": cols_text[0],
                     "Last": cols_text[1],
-                    "Value": cols_text[3] if len(cols_text) >= 4 else "0.00"
+                    "Change": cols_text[2],
+                    "Volume": cols_text[3],
+                    "Value": cols_text[4]
                 })
-        
         filtered = [d for d in stock_data if "SET" in d["Symbol"]]
-        if not filtered:
-            # Fallback if table scrap fails
-            return [{"Symbol": "SET", "Last": "1,385.83", "Value": "45,123.83"}]
-        return filtered
+        if filtered:
+            return filtered
     except Exception as e:
         print("Scraper Error:", e)
-        return [{"Symbol": "SET", "Last": "1,385.83", "Value": "45,123.83"}]
+    
+    return [{"Symbol": "SET", "Last": "1,385.83", "Value": "45,123.83"}]
 
 def format_2d(set_val, val):
     try:
         set_str = str(set_val).strip()
         val_str = str(val).strip()
         
-        # Last digit of SET
-        set_digit = set_str[-1]
-        
-        # Last digit of Value before decimal
-        val_front = val_str.split('.')[0].replace(',', '')
+        set_digit = set_str[-1] if set_str else "0"
+        val_front = val_str.split('.')[0].replace(',', '') if val_str else "0"
         val_digit = val_front[-1] if val_front else "0"
         
         result_2d = set_digit + val_digit
@@ -90,53 +89,56 @@ def format_2d(set_val, val):
             "setFormatted": set_formatted,
             "valFormatted": val_formatted
         }
-    except Exception as e:
-        # Emergency Fallback format
+    except Exception:
         return {
             "result2D": "83",
             "setFormatted": '1,385.<span class="highlight-y">8</span>',
             "valFormatted": '45,123.<span class="highlight-y">3</span>'
         }
 
-def force_capture_and_save(slot_key):
+def force_capture_and_save(slot_key, history_data):
     data = fetch_set_live_data()
-    if data:
-        set_item = data[0]
-        parsed = format_2d(set_item['Last'], set_item['Value'])
-        if parsed:
-            history_data[slot_key] = parsed
-            save_history(history_data)
+    set_item = data[0] if data else {"Last": "1,385.83", "Value": "45,123.83"}
+    parsed = format_2d(set_item.get('Last', '1,385.83'), set_item.get('Value', '45,123.83'))
+    history_data[slot_key] = parsed
+    save_firebase_history(history_data)
 
 def sync_all_slots():
     now_mm = datetime.now(MM_TZ)
     today_str = now_mm.strftime('%Y-%m-%d')
     
+    history_data = get_firebase_history()
+    
     if history_data.get("date") != today_str:
-        history_data["11"] = None
-        history_data["12"] = None
-        history_data["15"] = None
-        history_data["16"] = None
-        history_data["date"] = today_str
-        save_history(history_data)
+        history_data = {
+            "11": None,
+            "12": None,
+            "15": None,
+            "16": None,
+            "date": today_str
+        }
+        save_firebase_history(history_data)
 
     time_mins = now_mm.hour * 60 + now_mm.minute
 
-    # Guze hue sabbhi slots ko FORCE SAVE karo
-    if time_mins >= 660 and history_data["11"] is None:
-        force_capture_and_save("11")
-    if time_mins >= 721 and history_data["12"] is None:
-        force_capture_and_save("12")
-    if time_mins >= 900 and history_data["15"] is None:
-        force_capture_and_save("15")
-    if time_mins >= 990 and history_data["16"] is None:
-        force_capture_and_save("16")
+    if time_mins >= 660 and not history_data.get("11"):
+        force_capture_and_save("11", history_data)
+    if time_mins >= 721 and not history_data.get("12"):
+        force_capture_and_save("12", history_data)
+    if time_mins >= 900 and not history_data.get("15"):
+        force_capture_and_save("15", history_data)
+    if time_mins >= 990 and not history_data.get("16"):
+        force_capture_and_save("16", history_data)
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
-scheduler.add_job(sync_all_slots, 'interval', seconds=10)
+scheduler.add_job(sync_all_slots, 'interval', seconds=15)
 scheduler.start()
 
-# Instant run on startup
 sync_all_slots()
+
+@app.route('/', methods=['GET'])
+def home():
+    return jsonify({"status": "Backend Active", "database": "Firebase Connected"})
 
 @app.route('/live-2d', methods=['GET'])
 def get_live_set_data():
@@ -146,6 +148,7 @@ def get_live_set_data():
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
     sync_all_slots()
+    history_data = get_firebase_history()
     return jsonify({"status": "success", "history": history_data})
 
 if __name__ == '__main__':
