@@ -105,7 +105,7 @@ def save_time_slot(slot_key):
                 history_data[slot_key] = parsed
                 print(f"[{now_mm.strftime('%H:%M:%S')}] Saved Slot {slot_key}: {parsed['result2D']}")
 
-# Auto Sync Check (Fix for any missed slot due to network delay)
+# Smart Auto Sync (Guye hue time windows ke slots ko instant lock karega)
 def auto_sync_check():
     now_mm = datetime.now(MM_TZ)
     today_str = now_mm.strftime('%Y-%m-%d')
@@ -119,14 +119,14 @@ def auto_sync_check():
 
     time_mins = now_mm.hour * 60 + now_mm.minute
 
-    # Windows: 11:00-11:05, 12:01-12:05, 15:00-15:05, 16:30-16:35
-    if 660 <= time_mins < 665 and not history_data["11"]:
+    # Agar slot ka timing ho chuka hai aur wo khali hai, toh latest market value se fill kar do
+    if time_mins >= 660 and not history_data["11"]:    # 11:00 AM MM (660 mins)
         save_time_slot("11")
-    elif 721 <= time_mins < 726 and not history_data["12"]:
+    if time_mins >= 721 and not history_data["12"]:    # 12:01 PM MM (721 mins)
         save_time_slot("12")
-    elif 900 <= time_mins < 905 and not history_data["15"]:
+    if time_mins >= 900 and not history_data["15"]:    # 03:00 PM MM (900 mins)
         save_time_slot("15")
-    elif 990 <= time_mins < 995 and not history_data["16"]:
+    if time_mins >= 990 and not history_data["16"]:    # 04:30 PM MM (990 mins)
         save_time_slot("16")
 
 # Scheduler Setup
@@ -138,7 +138,7 @@ scheduler.add_job(save_time_slot, 'cron', hour=12, minute=1, args=['12'])
 scheduler.add_job(save_time_slot, 'cron', hour=15, minute=0, args=['15'])
 scheduler.add_job(save_time_slot, 'cron', hour=16, minute=30, args=['16'])
 
-# Backup checker runs every 1 minute
+# Auto sync checker runs every 1 minute
 scheduler.add_job(auto_sync_check, 'interval', minutes=1)
 
 scheduler.start()
