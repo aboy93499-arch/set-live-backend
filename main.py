@@ -5,21 +5,32 @@ from bs4 import BeautifulSoup
 from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
+import json
+import os
 
 app = Flask(__name__)
 CORS(app)
 
 MM_TZ = pytz.timezone('Asia/Yangon')
+DATA_FILE = "history.json"
 
-# Memory Store with Today Date Initialized
-now_init = datetime.now(MM_TZ)
-history_data = {
-    "11": None,
-    "12": None,
-    "15": None,
-    "16": None,
-    "date": now_init.strftime('%Y-%m-%d')
-}
+def load_history():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, 'r') as f:
+                return json.load(f)
+        except Exception:
+            pass
+    return {"11": None, "12": None, "15": None, "16": None, "date": ""}
+
+def save_history(data):
+    try:
+        with open(DATA_FILE, 'w') as f:
+            json.dump(data, f)
+    except Exception as e:
+        print("File save error:", e)
+
+history_data = load_history()
 
 def fetch_set_live_data():
     url = "https://www.set.or.th/th/home"
@@ -77,23 +88,22 @@ def force_capture_and_save(slot_key):
             parsed = format_2d(set_item['Last'], set_item['Value'])
             if parsed:
                 history_data[slot_key] = parsed
-                print(f"Locked Slot {slot_key}: {parsed['result2D']}")
+                save_history(history_data)
 
 def sync_all_slots():
     now_mm = datetime.now(MM_TZ)
     today_str = now_mm.strftime('%Y-%m-%d')
     
-    # Midnight Reset
     if history_data["date"] != today_str:
         history_data["11"] = None
         history_data["12"] = None
         history_data["15"] = None
         history_data["16"] = None
         history_data["date"] = today_str
+        save_history(history_data)
 
     time_mins = now_mm.hour * 60 + now_mm.minute
 
-    # Missed/Current Slots Auto-Fill
     if time_mins >= 660 and history_data["11"] is None:
         force_capture_and_save("11")
     if time_mins >= 721 and history_data["12"] is None:
@@ -103,13 +113,9 @@ def sync_all_slots():
     if time_mins >= 990 and history_data["16"] is None:
         force_capture_and_save("16")
 
-# Scheduler Setup
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 scheduler.add_job(sync_all_slots, 'interval', seconds=15)
 scheduler.start()
-
-# Initial Boot Run
-sync_all_slots()
 
 @app.route('/live-2d', methods=['GET'])
 def get_live_set_data():
@@ -118,7 +124,7 @@ def get_live_set_data():
 
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
-    sync_all_slots()  # Auto check on request
+    sync_all_slots()
     return jsonify({"status": "success", "history": history_data})
 
 if __name__ == '__main__':
