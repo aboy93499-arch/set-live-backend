@@ -12,7 +12,6 @@ CORS(app)
 
 MM_TZ = pytz.timezone('Asia/Yangon')
 
-# Firebase Database URL (Read from Environment Variable or fallback)
 FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://your-project-id-default-rtdb.firebaseio.com/")
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
@@ -91,16 +90,49 @@ def format_2d(set_val, val):
         }
     except Exception:
         return {
-            "result2D": "83",
-            "setFormatted": '1,385.<span class="highlight-y">8</span>',
-            "valFormatted": '45,123.<span class="highlight-y">3</span>'
+            "result2D": "--",
+            "setFormatted": "--",
+            "valFormatted": "--"
         }
 
-def force_capture_and_save(slot_key, history_data):
-    data = fetch_set_live_data()
-    set_item = data[0] if data else {"Last": "1,385.83", "Value": "45,123.83"}
-    parsed = format_2d(set_item.get('Last', '1,385.83'), set_item.get('Value', '45,123.83'))
-    history_data[slot_key] = parsed
+def fetch_official_2d_history():
+    """ Fetches real time-slot results from official 2D Myanmar API """
+    try:
+        res = requests.get("https://live2d.2dmyanmar.com/api/live", timeout=5)
+        if res.status_code == 200:
+            json_data = res.json()
+            result_map = {}
+            # Check for result objects in API response
+            result_list = json_data.get('result', [])
+            for item in result_list:
+                time_str = item.get('open_time', '')
+                set_val = item.get('set', '')
+                val_val = item.get('val', '')
+                
+                parsed = format_2d(set_val, val_val)
+                
+                if '11:00' in time_str:
+                    result_map['11'] = parsed
+                elif '12:01' in time_str or '12:00' in time_str:
+                    result_map['12'] = parsed
+                elif '15:00' in time_str or '14:30' in time_str:
+                    result_map['15'] = parsed
+                elif '16:30' in time_str or '16:00' in time_str:
+                    result_map['16'] = parsed
+            return result_map
+    except Exception as e:
+        print("Official API Fetch Error:", e)
+    return {}
+
+def force_capture_and_save(slot_key, history_data, official_results):
+    if slot_key in official_results and official_results[slot_key]["result2D"] != "--":
+        history_data[slot_key] = official_results[slot_key]
+    else:
+        # Fallback to current live SET data if official API item is missing
+        data = fetch_set_live_data()
+        set_item = data[0] if data else {"Last": "1,385.83", "Value": "45,123.83"}
+        parsed = format_2d(set_item.get('Last', '1,385.83'), set_item.get('Value', '45,123.83'))
+        history_data[slot_key] = parsed
     save_firebase_history(history_data)
 
 def sync_all_slots():
@@ -120,15 +152,16 @@ def sync_all_slots():
         save_firebase_history(history_data)
 
     time_mins = now_mm.hour * 60 + now_mm.minute
+    official_results = fetch_official_2d_history()
 
     if time_mins >= 660 and not history_data.get("11"):
-        force_capture_and_save("11", history_data)
+        force_capture_and_save("11", history_data, official_results)
     if time_mins >= 721 and not history_data.get("12"):
-        force_capture_and_save("12", history_data)
+        force_capture_and_save("12", history_data, official_results)
     if time_mins >= 900 and not history_data.get("15"):
-        force_capture_and_save("15", history_data)
+        force_capture_and_save("15", history_data, official_results)
     if time_mins >= 990 and not history_data.get("16"):
-        force_capture_and_save("16", history_data)
+        force_capture_and_save("16", history_data, official_results)
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 scheduler.add_job(sync_all_slots, 'interval', seconds=15)
