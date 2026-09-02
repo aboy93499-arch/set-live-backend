@@ -89,43 +89,16 @@ def format_2d(set_val, val):
             "valFormatted": val_formatted
         }
     except Exception:
-        return None
+        return {
+            "result2D": "--",
+            "setFormatted": "--",
+            "valFormatted": "--"
+        }
 
-def fetch_all_historical_results():
-    """ Tries to pull exact historical slot data from live 2d endpoints """
-    result_map = {}
-    try:
-        res = requests.get("https://live2d.2dmyanmar.com/api/live", timeout=5)
-        if res.status_code == 200:
-            data = res.json()
-            # Parse result list or live array structure
-            items = data.get('result', []) or data.get('live_2d', [])
-            for item in items:
-                time_str = str(item.get('open_time', '') or item.get('time', ''))
-                set_val = item.get('set', '')
-                val_val = item.get('val', '')
-                twod_val = item.get('twod', '')
-                
-                parsed = format_2d(set_val, val_val)
-                if not parsed and twod_val:
-                    parsed = {
-                        "result2D": str(twod_val),
-                        "setFormatted": str(set_val) if set_val else "--",
-                        "valFormatted": str(val_val) if val_val else "--"
-                    }
-                
-                if parsed:
-                    if '11:00' in time_str:
-                        result_map['11'] = parsed
-                    elif '12:01' in time_str or '12:00' in time_str:
-                        result_map['12'] = parsed
-                    elif '15:00' in time_str or '14:30' in time_str:
-                        result_map['15'] = parsed
-                    elif '16:30' in time_str or '16:00' in time_str:
-                        result_map['16'] = parsed
-    except Exception as e:
-        print("Historical Fetch Error:", e)
-    return result_map
+def capture_current_snapshot():
+    live_data = fetch_set_live_data()
+    set_item = live_data[0] if live_data else {"Last": "1,385.83", "Value": "45,123.83"}
+    return format_2d(set_item.get('Last', '1,385.83'), set_item.get('Value', '45,123.83'))
 
 def sync_all_slots():
     now_mm = datetime.now(MM_TZ)
@@ -133,6 +106,7 @@ def sync_all_slots():
     
     history_data = get_firebase_history()
     
+    # New Day Automatic Reset
     if history_data.get("date") != today_str:
         history_data = {
             "11": None,
@@ -143,46 +117,39 @@ def sync_all_slots():
         }
         save_firebase_history(history_data)
 
-    time_mins = now_mm.hour * 60 + now_mm.minute
-    historical = fetch_all_historical_results()
-
-    # Slot update checks
+    hour = now_mm.hour
+    minute = now_mm.minute
+    
     updated = False
     
-    # 11:00 AM Slot
-    if time_mins >= 660 and not history_data.get("11"):
-        if '11' in historical:
-            history_data["11"] = historical['11']
-            updated = True
-            
-    # 12:01 PM Slot
-    if time_mins >= 721 and not history_data.get("12"):
-        if '12' in historical:
-            history_data["12"] = historical['12']
-            updated = True
+    # EXACT TIME CAPTURES
+    
+    # Slot 1: 11:00 AM (Hour 11, Minute 0)
+    if hour == 11 and minute == 0 and not history_data.get("11"):
+        history_data["11"] = capture_current_snapshot()
+        updated = True
 
-    # 3:00 PM Slot
-    if time_mins >= 900 and not history_data.get("15"):
-        if '15' in historical:
-            history_data["15"] = historical['15']
-            updated = True
+    # Slot 2: 12:01 PM (Hour 12, Minute 1)
+    if hour == 12 and minute == 1 and not history_data.get("12"):
+        history_data["12"] = capture_current_snapshot()
+        updated = True
 
-    # 4:30 PM Slot
-    if time_mins >= 990 and not history_data.get("16"):
-        if '16' in historical:
-            history_data["16"] = historical['16']
-            updated = True
-        elif not history_data.get("16"): # Last slot live fallback
-            live = fetch_set_live_data()
-            set_item = live[0] if live else {"Last": "1,385.83", "Value": "45,123.83"}
-            history_data["16"] = format_2d(set_item.get('Last'), set_item.get('Value'))
-            updated = True
+    # Slot 3: 3:00 PM (Hour 15, Minute 0)
+    if hour == 15 and minute == 0 and not history_data.get("15"):
+        history_data["15"] = capture_current_snapshot()
+        updated = True
+
+    # Slot 4: 4:30 PM (Hour 16, Minute 30)
+    if hour == 16 and minute == 30 and not history_data.get("16"):
+        history_data["16"] = capture_current_snapshot()
+        updated = True
 
     if updated:
         save_firebase_history(history_data)
 
+# Scheduler runs every 2 seconds to ensure exact minute precision
 scheduler = BackgroundScheduler(timezone=MM_TZ)
-scheduler.add_job(sync_all_slots, 'interval', seconds=15)
+scheduler.add_job(sync_all_slots, 'interval', seconds=2)
 scheduler.start()
 
 sync_all_slots()
