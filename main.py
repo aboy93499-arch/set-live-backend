@@ -100,13 +100,12 @@ def capture_current_snapshot():
     set_item = live_data[0] if live_data else {"Last": "1,385.83", "Value": "45,123.83"}
     return format_2d(set_item.get('Last', '1,385.83'), set_item.get('Value', '45,123.83'))
 
-def sync_all_slots():
+# Clean daily reset function
+def check_day_reset():
     now_mm = datetime.now(MM_TZ)
     today_str = now_mm.strftime('%Y-%m-%d')
-    
     history_data = get_firebase_history()
     
-    # Automatic New Day Reset
     if history_data.get("date") != today_str:
         history_data = {
             "11": None,
@@ -117,42 +116,28 @@ def sync_all_slots():
         }
         save_firebase_history(history_data)
 
-    hour = now_mm.hour
-    minute = now_mm.minute
+# Specific Slot Capture Job
+def capture_slot(slot_key):
+    check_day_reset()
+    history_data = get_firebase_history()
     
-    updated = False
-    
-    # EXACT TIME CAPTURES
-    
-    # 11:00 AM Slot
-    if hour == 11 and minute == 0 and not history_data.get("11"):
-        history_data["11"] = capture_current_snapshot()
-        updated = True
+    # Snapshot live data right at this exact second
+    snapshot = capture_current_snapshot()
+    history_data[slot_key] = snapshot
+    save_firebase_history(history_data)
 
-    # 12:01 PM Slot
-    if hour == 12 and minute == 1 and not history_data.get("12"):
-        history_data["12"] = capture_current_snapshot()
-        updated = True
-
-    # 3:00 PM Slot
-    if hour == 15 and minute == 0 and not history_data.get("15"):
-        history_data["15"] = capture_current_snapshot()
-        updated = True
-
-    # 4:30 PM Slot
-    if hour == 16 and minute == 30 and not history_data.get("16"):
-        history_data["16"] = capture_current_snapshot()
-        updated = True
-
-    if updated:
-        save_firebase_history(history_data)
-
-# Scheduler runs every 2 seconds for exact timing accuracy
 scheduler = BackgroundScheduler(timezone=MM_TZ)
-scheduler.add_job(sync_all_slots, 'interval', seconds=2)
-scheduler.start()
 
-sync_all_slots()
+# Exact Time Schedules (CRON Jobs)
+scheduler.add_job(capture_slot, 'cron', hour=11, minute=0, second=0, args=['11'])
+scheduler.add_job(capture_slot, 'cron', hour=12, minute=1, second=0, args=['12'])
+scheduler.add_job(capture_slot, 'cron', hour=15, minute=0, second=0, args=['15'])
+scheduler.add_job(capture_slot, 'cron', hour=16, minute=30, second=0, args=['16'])
+
+# Midnight Reset Job
+scheduler.add_job(check_day_reset, 'cron', hour=0, minute=1, second=0)
+
+scheduler.start()
 
 @app.route('/', methods=['GET'])
 def home():
@@ -165,7 +150,7 @@ def get_live_set_data():
 
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
-    sync_all_slots()
+    check_day_reset()
     history_data = get_firebase_history()
     return jsonify({"status": "success", "history": history_data})
 
