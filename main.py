@@ -106,7 +106,7 @@ def sync_all_slots():
     
     history_data = get_firebase_history()
     
-    # New Day Automatic Reset
+    # Automatic New Day Reset
     if history_data.get("date") != today_str:
         history_data = {
             "11": None,
@@ -124,22 +124,22 @@ def sync_all_slots():
     
     # EXACT TIME CAPTURES
     
-    # Slot 1: 11:00 AM (Hour 11, Minute 0)
+    # 11:00 AM Slot
     if hour == 11 and minute == 0 and not history_data.get("11"):
         history_data["11"] = capture_current_snapshot()
         updated = True
 
-    # Slot 2: 12:01 PM (Hour 12, Minute 1)
+    # 12:01 PM Slot
     if hour == 12 and minute == 1 and not history_data.get("12"):
         history_data["12"] = capture_current_snapshot()
         updated = True
 
-    # Slot 3: 3:00 PM (Hour 15, Minute 0)
+    # 3:00 PM Slot
     if hour == 15 and minute == 0 and not history_data.get("15"):
         history_data["15"] = capture_current_snapshot()
         updated = True
 
-    # Slot 4: 4:30 PM (Hour 16, Minute 30)
+    # 4:30 PM Slot
     if hour == 16 and minute == 30 and not history_data.get("16"):
         history_data["16"] = capture_current_snapshot()
         updated = True
@@ -147,7 +147,7 @@ def sync_all_slots():
     if updated:
         save_firebase_history(history_data)
 
-# Scheduler runs every 2 seconds to ensure exact minute precision
+# Scheduler runs every 2 seconds for exact timing accuracy
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 scheduler.add_job(sync_all_slots, 'interval', seconds=2)
 scheduler.start()
