@@ -110,7 +110,6 @@ def check_day_reset():
     today_str = now_mm.strftime('%Y-%m-%d')
     history_data = get_firebase_history()
     
-    # Strictly reset only on Monday-Friday when day changes
     if history_data.get("date") != today_str:
         if now_mm.weekday() < 5:
             history_data = {
@@ -124,7 +123,6 @@ def check_day_reset():
 
 def capture_slot(slot_key):
     now_mm = datetime.now(MM_TZ)
-    # Don't capture on Saturday (5) or Sunday (6)
     if now_mm.weekday() in [5, 6]:
         return
 
@@ -138,29 +136,21 @@ def capture_slot(slot_key):
 
 def is_market_open():
     now_mm = datetime.now(MM_TZ)
-    
-    # Weekend Closed
     if now_mm.weekday() in [5, 6]:
         return False
 
     time_mins = now_mm.hour * 60 + now_mm.minute
-    
-    # Morning: 09:30 AM to 12:01 PM
-    # Afternoon: 01:30 PM to 04:30 PM
     session1 = 570 <= time_mins < 721
     session2 = 810 <= time_mins < 990
-    
     return session1 or session2
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Exact Time CRON Jobs (Mon-Fri)
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
 
-# Reset Job (Morning 9:00 AM on Weekdays)
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
 scheduler.start()
@@ -173,26 +163,34 @@ def home():
 def get_live_set_data():
     market_active = is_market_open()
     history = get_firebase_history()
+    now_mm = datetime.now(MM_TZ)
     
     if market_active:
         data = fetch_set_live_data()
-        return jsonify({"status": "success", "live": True, "data": data})
+        return jsonify({
+            "status": "success", 
+            "live": True, 
+            "time": now_mm.strftime('%Y-%m-%d %H:%M:%S'),
+            "data": data
+        })
     else:
-        # Show last saved valid snapshot when market is closed/break
-        now_mm = datetime.now(MM_TZ)
         time_mins = now_mm.hour * 60 + now_mm.minute
         
         frozen_snapshot = None
+        pause_time = "Closed"
+        
         if 721 <= time_mins < 810:
             frozen_snapshot = history.get("12")
-        elif time_mins >= 990 or time_mins < 570 or now_mm.weekday() in [5, 6]:
-            # Priority: 16 -> 15 -> 12 -> 11 (Whatever was recorded last)
+            pause_time = f"{history.get('date', now_mm.strftime('%Y-%m-%d'))} 12:01:00"
+        else:
             frozen_snapshot = history.get("16") or history.get("15") or history.get("12") or history.get("11")
+            pause_time = f"{history.get('date', now_mm.strftime('%Y-%m-%d'))} 16:30:00"
 
         return jsonify({
             "status": "success",
             "live": False,
-            "data": frozen_snapshot if frozen_snapshot else []
+            "time": pause_time,
+            "frozenData": frozen_snapshot
         })
 
 @app.route('/history-2d', methods=['GET'])
