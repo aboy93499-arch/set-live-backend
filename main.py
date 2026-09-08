@@ -16,28 +16,20 @@ FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://setlive-5e4e6-default-
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
 
-def get_firebase_history():
+def get_firebase_node(node_name):
     try:
-        res = requests.get(f"{FIREBASE_URL}history_2d.json", timeout=5)
+        res = requests.get(f"{FIREBASE_URL}{node_name}.json", timeout=5)
         if res.status_code == 200 and res.json():
             return res.json()
     except Exception as e:
-        print("Firebase fetch error:", e)
-    
-    now_init = datetime.now(MM_TZ)
-    return {
-        "11": None,
-        "12": None,
-        "15": None,
-        "16": None,
-        "date": now_init.strftime('%Y-%m-%d')
-    }
+        print(f"Firebase fetch error ({node_name}):", e)
+    return {}
 
-def save_firebase_history(data):
+def save_firebase_node(node_name, data):
     try:
-        requests.put(f"{FIREBASE_URL}history_2d.json", json=data, timeout=5)
+        requests.put(f"{FIREBASE_URL}{node_name}.json", json=data, timeout=5)
     except Exception as e:
-        print("Firebase save error:", e)
+        print(f"Firebase save error ({node_name}):", e)
 
 def fetch_set_live_data():
     url = "https://www.set.or.th/th/home"
@@ -63,7 +55,6 @@ def fetch_set_live_data():
             return filtered
     except Exception as e:
         print("Scraper Error:", e)
-    
     return []
 
 def format_2d(set_val, val):
@@ -92,11 +83,7 @@ def format_2d(set_val, val):
             "valFormatted": val_formatted
         }
     except Exception:
-        return {
-            "result2D": "--",
-            "setFormatted": "--",
-            "valFormatted": "--"
-        }
+        return {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
 
 def capture_current_snapshot():
     live_data = fetch_set_live_data()
@@ -108,7 +95,7 @@ def capture_current_snapshot():
 def check_day_reset():
     now_mm = datetime.now(MM_TZ)
     today_str = now_mm.strftime('%Y-%m-%d')
-    history_data = get_firebase_history()
+    history_data = get_firebase_node("history_2d")
     
     if history_data.get("date") != today_str:
         if now_mm.weekday() < 5:
@@ -119,7 +106,7 @@ def check_day_reset():
                 "16": None,
                 "date": today_str
             }
-            save_firebase_history(history_data)
+            save_firebase_node("history_2d", history_data)
 
 def capture_slot(slot_key):
     now_mm = datetime.now(MM_TZ)
@@ -127,12 +114,27 @@ def capture_slot(slot_key):
         return
 
     check_day_reset()
-    history_data = get_firebase_history()
+    history_data = get_firebase_node("history_2d")
     snapshot = capture_current_snapshot()
     
     if snapshot["result2D"] != "--":
         history_data[slot_key] = snapshot
-        save_firebase_history(history_data)
+        save_firebase_node("history_2d", history_data)
+        
+        # Archive specifically for 12:01 PM and 4:30 PM into monthly calendar node
+        if slot_key in ["12", "16"]:
+            date_key = now_mm.strftime('%Y-%m-%d')
+            calendar_records = get_firebase_node("calendar_history") or {}
+            
+            if date_key not in calendar_records:
+                calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
+            
+            if slot_key == "12":
+                calendar_records[date_key]["res12"] = snapshot["result2D"]
+            elif slot_key == "16":
+                calendar_records[date_key]["res16"] = snapshot["result2D"]
+                
+            save_firebase_node("calendar_history", calendar_records)
 
 def is_market_open():
     now_mm = datetime.now(MM_TZ)
@@ -150,7 +152,6 @@ scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
-
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
 scheduler.start()
@@ -162,7 +163,7 @@ def home():
 @app.route('/live-2d', methods=['GET'])
 def get_live_set_data():
     market_active = is_market_open()
-    history = get_firebase_history()
+    history = get_firebase_node("history_2d")
     now_mm = datetime.now(MM_TZ)
     
     if market_active:
@@ -175,9 +176,7 @@ def get_live_set_data():
         })
     else:
         time_mins = now_mm.hour * 60 + now_mm.minute
-        
         frozen_snapshot = None
-        pause_time = "Closed"
         
         if 721 <= time_mins < 810:
             frozen_snapshot = history.get("12")
@@ -195,8 +194,13 @@ def get_live_set_data():
 
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
-    history_data = get_firebase_history()
+    history_data = get_firebase_node("history_2d")
     return jsonify({"status": "success", "history": history_data})
+
+@app.route('/calendar-history', methods=['GET'])
+def get_calendar_history():
+    records = get_firebase_node("calendar_history") or {}
+    return jsonify({"status": "success", "records": records})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=8000)
