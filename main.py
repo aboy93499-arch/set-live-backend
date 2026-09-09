@@ -116,19 +116,20 @@ def capture_slot(slot_key):
 
     check_day_reset()
     
-    # 5 attempts with short delay to catch ticks right around the target time (like 10:59:58 / 11:00:01)
-    snapshot = {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
+    first_valid_snapshot = None
     
-    for _ in range(5):
+    # Target time par sabse PEHLA valid number milte hi turant BREAK kar dega
+    # Taaki aage waqt (jaise 15:00:04) par badla hua number capture NA ho.
+    for _ in range(10):
         curr_snapshot = capture_current_snapshot()
         if curr_snapshot["result2D"] != "--":
-            snapshot = curr_snapshot
-            # Latest tick received, keep updated value
-        time.sleep(1.2)
+            first_valid_snapshot = curr_snapshot
+            break  # Pehla valid result milte hi lock
+        time.sleep(0.5)
 
-    if snapshot["result2D"] != "--":
+    if first_valid_snapshot and first_valid_snapshot["result2D"] != "--":
         history_data = get_firebase_node("history_2d")
-        history_data[slot_key] = snapshot
+        history_data[slot_key] = first_valid_snapshot
         save_firebase_node("history_2d", history_data)
         
         # Archive specifically for 12:01 PM and 4:30 PM into monthly calendar node
@@ -140,9 +141,9 @@ def capture_slot(slot_key):
                 calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
             
             if slot_key == "12":
-                calendar_records[date_key]["res12"] = snapshot["result2D"]
+                calendar_records[date_key]["res12"] = first_valid_snapshot["result2D"]
             elif slot_key == "16":
-                calendar_records[date_key]["res16"] = snapshot["result2D"]
+                calendar_records[date_key]["res16"] = first_valid_snapshot["result2D"]
                 
             save_firebase_node("calendar_history", calendar_records)
 
@@ -158,11 +159,11 @@ def is_market_open():
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Trigger scheduler slightly early/exact so loop captures ticks like 10:59:58 to 11:00:02 seamlessly
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=10, minute=59, second=57, args=['11'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=0, second=57, args=['12'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=14, minute=59, second=57, args=['15'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=29, second=57, args=['16'])
+# Exact Target Time (:00 second) par trigger hoga
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
 
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
