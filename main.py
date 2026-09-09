@@ -6,6 +6,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from datetime import datetime
 import pytz
 import os
+import time
 
 app = Flask(__name__)
 CORS(app)
@@ -114,10 +115,19 @@ def capture_slot(slot_key):
         return
 
     check_day_reset()
-    history_data = get_firebase_node("history_2d")
-    snapshot = capture_current_snapshot()
     
+    # 5 attempts with short delay to catch ticks right around the target time (like 10:59:58 / 11:00:01)
+    snapshot = {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
+    
+    for _ in range(5):
+        curr_snapshot = capture_current_snapshot()
+        if curr_snapshot["result2D"] != "--":
+            snapshot = curr_snapshot
+            # Latest tick received, keep updated value
+        time.sleep(1.2)
+
     if snapshot["result2D"] != "--":
+        history_data = get_firebase_node("history_2d")
         history_data[slot_key] = snapshot
         save_firebase_node("history_2d", history_data)
         
@@ -148,10 +158,12 @@ def is_market_open():
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
+# Trigger scheduler slightly early/exact so loop captures ticks like 10:59:58 to 11:00:02 seamlessly
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=10, minute=59, second=57, args=['11'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=0, second=57, args=['12'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=14, minute=59, second=57, args=['15'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=29, second=57, args=['16'])
+
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
 scheduler.start()
