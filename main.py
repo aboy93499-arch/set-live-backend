@@ -13,7 +13,8 @@ CORS(app)
 
 MM_TZ = pytz.timezone('Asia/Yangon')
 
-FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://setlive-5e4e6-default-rtdb.firebaseio.com/")
+# FIXED 1: Frontend ke sath Firebase Database URL match kar diya gaya hai
+FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://aungkyaw2d-f6faf-default-rtdb.firebaseio.com/")
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
 
@@ -116,16 +117,18 @@ def capture_slot(slot_key):
 
     check_day_reset()
     
+    # FIXED 2: Website update sync hone ke liye 2 second ka initial wait add kiya gaya hai
+    time.sleep(2)
+    
     first_valid_snapshot = None
     
-    # Target time par sabse PEHLA valid number milte hi turant BREAK kar dega
-    # Taaki aage waqt (jaise 15:00:04) par badla hua number capture NA ho.
-    for _ in range(10):
+    # 15 retries with 1 sec delay to ensure exact target time value is fetched
+    for _ in range(15):
         curr_snapshot = capture_current_snapshot()
         if curr_snapshot["result2D"] != "--":
             first_valid_snapshot = curr_snapshot
-            break  # Pehla valid result milte hi lock
-        time.sleep(0.5)
+            break
+        time.sleep(1)
 
     if first_valid_snapshot and first_valid_snapshot["result2D"] != "--":
         history_data = get_firebase_node("history_2d")
