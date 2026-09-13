@@ -13,7 +13,6 @@ CORS(app)
 
 MM_TZ = pytz.timezone('Asia/Yangon')
 
-# FIXED 1: Frontend ke sath Firebase Database URL match kar diya gaya hai
 FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://aungkyaw2d-f6faf-default-rtdb.firebaseio.com/")
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
@@ -97,7 +96,7 @@ def capture_current_snapshot():
 def check_day_reset():
     now_mm = datetime.now(MM_TZ)
     today_str = now_mm.strftime('%Y-%m-%d')
-    history_data = get_firebase_node("history_2d")
+    history_data = get_firebase_node("history_2d") or {}
     
     if history_data.get("date") != today_str:
         if now_mm.weekday() < 5:
@@ -116,39 +115,62 @@ def capture_slot(slot_key):
         return
 
     check_day_reset()
-    
-    # FIXED 2: Website update sync hone ke liye 2 second ka initial wait add kiya gaya hai
-    time.sleep(2)
-    
-    first_valid_snapshot = None
-    
-    # 15 retries with 1 sec delay to ensure exact target time value is fetched
-    for _ in range(15):
-        curr_snapshot = capture_current_snapshot()
-        if curr_snapshot["result2D"] != "--":
-            first_valid_snapshot = curr_snapshot
-            break
-        time.sleep(1)
 
-    if first_valid_snapshot and first_valid_snapshot["result2D"] != "--":
-        history_data = get_firebase_node("history_2d")
-        history_data[slot_key] = first_valid_snapshot
+    # Pehle check karein ki is slot me valid data locked toh nahi hai
+    history_data = get_firebase_node("history_2d") or {}
+    if history_data.get(slot_key) and history_data[slot_key].get("result2D") not in ["--", None, ""]:
+        print(f"[{slot_key}] Already locked with valid data. Skipping.")
+        return
+
+    print(f"[{slot_key}] Continuous buffer recording started...")
+
+    buffer_data = []
+
+    # Target time window: 25 seconds tak lagatar snapshot capture
+    for _ in range(25):
+        capture_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
+        snapshot = capture_current_snapshot()
+        buffer_data.append({
+            "timestamp": capture_time,
+            "snapshot": snapshot
+        })
+        time.sleep(1.0)
+
+    # Buffer me se SABSE PEHLA valid result (00s -> 01s -> 02s...) find karein
+    selected_snapshot = None
+    winning_time = None
+
+    for item in buffer_data:
+        res_2d = item["snapshot"].get("result2D")
+        if res_2d not in ["--", None, ""]:
+            selected_snapshot = item["snapshot"]
+            winning_time = item["timestamp"]
+            break  # Pehla valid number milte hi loop exit
+
+    # Valid result milte hi Firebase me lock karein
+    if selected_snapshot:
+        history_data = get_firebase_node("history_2d") or {}
+        history_data[slot_key] = selected_snapshot
         save_firebase_node("history_2d", history_data)
-        
-        # Archive specifically for 12:01 PM and 4:30 PM into monthly calendar node
+
+        # Calendar History sync (12:01 PM & 4:30 PM ke liye)
         if slot_key in ["12", "16"]:
             date_key = now_mm.strftime('%Y-%m-%d')
             calendar_records = get_firebase_node("calendar_history") or {}
-            
+
             if date_key not in calendar_records:
                 calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
-            
+
             if slot_key == "12":
-                calendar_records[date_key]["res12"] = first_valid_snapshot["result2D"]
+                calendar_records[date_key]["res12"] = selected_snapshot["result2D"]
             elif slot_key == "16":
-                calendar_records[date_key]["res16"] = first_valid_snapshot["result2D"]
-                
+                calendar_records[date_key]["res16"] = selected_snapshot["result2D"]
+
             save_firebase_node("calendar_history", calendar_records)
+
+        print(f"[{slot_key}] WINNER LOCKED! First valid result '{selected_snapshot['result2D']}' at {winning_time}.")
+    else:
+        print(f"[{slot_key}] No valid result updated in buffer window.")
 
 def is_market_open():
     now_mm = datetime.now(MM_TZ)
@@ -162,11 +184,11 @@ def is_market_open():
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Exact Target Time (:00 second) par trigger hoga
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
+# Target time se exact 5 seconds pehle trigger hoga taaki 00s frame recording start rahe
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=10, minute=59, second=55, args=['11'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=0, second=55, args=['12'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=14, minute=59, second=55, args=['15'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=29, second=55, args=['16'])
 
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
@@ -179,7 +201,7 @@ def home():
 @app.route('/live-2d', methods=['GET'])
 def get_live_set_data():
     market_active = is_market_open()
-    history = get_firebase_node("history_2d")
+    history = get_firebase_node("history_2d") or {}
     now_mm = datetime.now(MM_TZ)
     
     if market_active:
@@ -210,7 +232,7 @@ def get_live_set_data():
 
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
-    history_data = get_firebase_node("history_2d")
+    history_data = get_firebase_node("history_2d") or {}
     return jsonify({"status": "success", "history": history_data})
 
 @app.route('/calendar-history', methods=['GET'])
