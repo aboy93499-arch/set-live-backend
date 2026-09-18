@@ -121,52 +121,28 @@ def capture_slot(slot_key):
         print(f"[{slot_key}] Already locked. Skipping.")
         return
 
-    print(f"[{slot_key}] Collecting buffer data from :00 to :15 seconds...")
+    # EXACT SECOND DATA CAPTURE LOGIC
+    # Scheduler exact target time (e.g. 11:00:00) par trigger karega
+    start_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
+    print(f"[{slot_key}] Triggered exactly at {start_time}. Fetching snapshot...")
 
-    # STEP 1: Pehle target minute ke baseline/purane snapshot ko detect karo taaki filtering ho sake
-    initial_snapshot = capture_current_snapshot()
-    initial_res = initial_snapshot.get("result2D")
-
-    collected_buffer = []
-
-    # STEP 2: Target minute se :15 sec tak poora buffer collect karo
-    for _ in range(15):
-        current_dt = datetime.now(MM_TZ)
-        capture_time = current_dt.strftime('%H:%M:%S')
-        snap = capture_current_snapshot()
-        
-        collected_buffer.append({
-            "timestamp": capture_time,
-            "snapshot": snap
-        })
-        time.sleep(1.0)
-
-    # STEP 3: Buffer me sequential search (:00 -> :01 -> :02 -> ... -> :15)
-    # Check karo ki kis SABSE PEHLE second par NEW/UPDATED result aaya hai
     selected_snapshot = None
     winning_time = None
 
-    for item in collected_buffer:
-        res = item["snapshot"].get("result2D")
+    # Exact :00 sec se lekar agle 10-15 seconds tak continuous poll (0.5 sec pause for speed)
+    for _ in range(20):
+        current_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
+        snap = capture_current_snapshot()
+        res = snap.get("result2D")
         
-        # Valid numerical data hona chahiye
         if res not in ["--", None, ""]:
-            # Agar value target minute ke start hone par update hui hai (Purane pre-minute data se alag)
-            if res != initial_res:
-                selected_snapshot = item["snapshot"]
-                winning_time = item["timestamp"]
-                break # SABSE PEHLA naya value milte hi loop STOP
+            selected_snapshot = snap
+            winning_time = current_time
+            break
+        
+        time.sleep(0.5)
 
-    # Fallback: Agar market me exact :00 par hi value fix thi aur Change nahi hui, tab bhi pehla valid snapshot lock karo
-    if not selected_snapshot and collected_buffer:
-        for item in collected_buffer:
-            res = item["snapshot"].get("result2D")
-            if res not in ["--", None, ""]:
-                selected_snapshot = item["snapshot"]
-                winning_time = item["timestamp"]
-                break
-
-    # STEP 4: Lock and Save selected result to Firebase
+    # Save selected result to Firebase
     if selected_snapshot:
         history_data = get_firebase_node("history_2d") or {}
         history_data[slot_key] = selected_snapshot
@@ -186,9 +162,9 @@ def capture_slot(slot_key):
 
             save_firebase_node("calendar_history", calendar_records)
 
-        print(f"[{slot_key}] SUCCESS LOCKED EARLIEST VALID RESULT: '{selected_snapshot['result2D']}' at {winning_time}")
+        print(f"[{slot_key}] LOCKED EXACT RESULT: '{selected_snapshot['result2D']}' captured at {winning_time}")
     else:
-        print(f"[{slot_key}] No valid result captured in window.")
+        print(f"[{slot_key}] No valid result captured at {start_time}.")
 
 def is_market_open():
     now_mm = datetime.now(MM_TZ)
@@ -202,7 +178,7 @@ def is_market_open():
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Exact :00 second par trigger karega
+# Target exact timings
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
