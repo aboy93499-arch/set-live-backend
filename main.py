@@ -7,6 +7,7 @@ from datetime import datetime
 import pytz
 import os
 import time
+import threading
 
 app = Flask(__name__)
 CORS(app)
@@ -17,6 +18,9 @@ FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://aungkyaw2d-f6faf-defau
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
 
+# ==========================================
+# FIREBASE HELPERS
+# ==========================================
 def get_firebase_node(node_name):
     try:
         res = requests.get(f"{FIREBASE_URL}{node_name}.json", timeout=5)
@@ -32,6 +36,9 @@ def save_firebase_node(node_name, data):
     except Exception as e:
         print(f"Firebase save error ({node_name}):", e)
 
+# ==========================================
+# SCRAPER & 2D CALCULATION
+# ==========================================
 def fetch_set_live_data():
     url = "https://www.set.or.th/th/home"
     headers = {"User-Agent": "Mozilla/5.0"}
@@ -122,7 +129,33 @@ def check_day_reset():
             save_firebase_node("history_2d", history_data)
 
 # ==========================================
-# NEW FEATURE: REAL-TIME TICKER LOGGER
+# HIGH-SPEED WINDOW CHECK
+# ==========================================
+def is_in_high_speed_window():
+    """
+    Check karta hai ki time target slot ke high-speed window me hai ya nahi:
+    - Slot 11:00 (10:59:30 se 11:00:25)
+    - Slot 12:01 (12:00:30 se 12:01:25)
+    - Slot 15:00 (14:59:30 se 15:00:25)
+    - Slot 16:30 (16:29:30 se 16:30:25)
+    """
+    now_mm = datetime.now(MM_TZ)
+    time_mins = now_mm.hour * 60 + now_mm.minute
+    sec = now_mm.second
+
+    if (time_mins == 659 and sec >= 30) or (time_mins == 660 and sec <= 25):
+        return True
+    if (time_mins == 720 and sec >= 30) or (time_mins == 721 and sec <= 25):
+        return True
+    if (time_mins == 899 and sec >= 30) or (time_mins == 900 and sec <= 25):
+        return True
+    if (time_mins == 989 and sec >= 30) or (time_mins == 990 and sec <= 25):
+        return True
+
+    return False
+
+# ==========================================
+# REAL-TIME TICKER LOGGER & ADAPTIVE THREAD
 # ==========================================
 def run_live_logger():
     if not is_market_open():
@@ -142,8 +175,20 @@ def run_live_logger():
             "setFormatted": snap.get("setFormatted"),
             "valFormatted": snap.get("valFormatted")
         }
-        # Firebase me `/live_ticks/2026-09-26/11:00:00` node save karega
         save_firebase_node(f"live_ticks/{date_str}/{time_str.replace(':', '_')}", tick_entry)
+
+def start_adaptive_logger():
+    while True:
+        try:
+            run_live_logger()
+        except Exception as e:
+            print("Logger Loop Error:", e)
+        
+        # High speed window me 1 sec pause, baki time 3 sec pause
+        if is_in_high_speed_window():
+            time.sleep(1)
+        else:
+            time.sleep(3)
 
 # ==========================================
 # SLOT LOCKING FROM LIVE LOGS
@@ -160,8 +205,8 @@ def capture_slot(slot_key):
         print(f"[{slot_key}] Already locked. Skipping.")
         return
 
-    # Slot lock karne ke liye 10 sec wait karein taaki logs upload ho sakein
-    time.sleep(10)
+    # Critical window complete hone tak 5 sec wait karein
+    time.sleep(5)
 
     target_times = {
         "11": "11:00:00",
@@ -179,11 +224,11 @@ def capture_slot(slot_key):
     winning_time = None
 
     if ticks_data:
-        # Search for exact or earliest time after target time
+        # Target time ke barabar ya uske just baad aane wali PEHLI tick entry dhoondhega (e.g. 11:00:00, 11:00:01, 11:00:02)
         valid_keys = sorted([k for k in ticks_data.keys() if k.replace('_', ':') >= target_time_str])
         
         if valid_keys:
-            best_key = valid_keys[0] # SABSE PEHLA valid timestamp
+            best_key = valid_keys[0] # SABSE PEHLA timestamp
             raw_item = ticks_data[best_key]
             selected_snapshot = {
                 "result2D": raw_item["result2D"],
@@ -219,18 +264,18 @@ def capture_slot(slot_key):
 # ==========================================
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Har 3 second me live ticker log chalega
-scheduler.add_job(run_live_logger, 'interval', seconds=3)
-
-# Exact Target Slots Trigger
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
-scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
+# Target slots ke 30th second par lock trigger hoga taaki fast window ticks process ho chuki hon
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=30, args=['11'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=30, args=['12'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=30, args=['15'])
+scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=30, args=['16'])
 
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
 scheduler.start()
+
+# Adaptive dynamic interval logger thread start karein
+threading.Thread(target=start_adaptive_logger, daemon=True).start()
 
 # ==========================================
 # API ENDPOINTS
@@ -239,14 +284,12 @@ scheduler.start()
 def home():
     return jsonify({"status": "Backend Active", "database": "Firebase Connected"})
 
-# NAYA API ENDPOINT: Frontend par Screenshot jaisi live table dikhane ke liye
 @app.route('/live-logs', methods=['GET'])
 def get_live_logs():
     now_mm = datetime.now(MM_TZ)
     date_str = now_mm.strftime('%Y-%m-%d')
     ticks_data = get_firebase_node(f"live_ticks/{date_str}") or {}
     
-    # Time descending order me sort (Latest upar)
     sorted_logs = sorted(ticks_data.values(), key=lambda x: x['time'], reverse=True)
     return jsonify({"status": "success", "logs": sorted_logs})
 
