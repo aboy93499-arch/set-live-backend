@@ -64,7 +64,7 @@ def format_2d(set_val, val):
         val_str = str(val).strip()
         
         if not set_str or not val_str or set_str == "--" or val_str == "--":
-            return {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
+            return {"result2D": "--", "setFormatted": "--", "valFormatted": "--", "rawSet": "--", "rawVal": "--"}
 
         set_digit = set_str[-1] if set_str else "0"
         val_front = val_str.split('.')[0].replace(',', '') if val_str else "0"
@@ -81,17 +81,29 @@ def format_2d(set_val, val):
         return {
             "result2D": result_2d,
             "setFormatted": set_formatted,
-            "valFormatted": val_formatted
+            "valFormatted": val_formatted,
+            "rawSet": set_str,
+            "rawVal": val_str
         }
     except Exception:
-        return {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
+        return {"result2D": "--", "setFormatted": "--", "valFormatted": "--", "rawSet": "--", "rawVal": "--"}
 
 def capture_current_snapshot():
     live_data = fetch_set_live_data()
     if live_data:
         set_item = live_data[0]
         return format_2d(set_item.get('Last', ''), set_item.get('Value', ''))
-    return {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
+    return {"result2D": "--", "setFormatted": "--", "valFormatted": "--", "rawSet": "--", "rawVal": "--"}
+
+def is_market_open():
+    now_mm = datetime.now(MM_TZ)
+    if now_mm.weekday() in [5, 6]:
+        return False
+
+    time_mins = now_mm.hour * 60 + now_mm.minute
+    session1 = 570 <= time_mins < 721   # 09:30 AM to 12:01 PM
+    session2 = 810 <= time_mins < 990   # 01:30 PM to 04:30 PM
+    return session1 or session2
 
 def check_day_reset():
     now_mm = datetime.now(MM_TZ)
@@ -109,6 +121,33 @@ def check_day_reset():
             }
             save_firebase_node("history_2d", history_data)
 
+# ==========================================
+# NEW FEATURE: REAL-TIME TICKER LOGGER
+# ==========================================
+def run_live_logger():
+    if not is_market_open():
+        return
+
+    now_mm = datetime.now(MM_TZ)
+    time_str = now_mm.strftime('%H:%M:%S')
+    date_str = now_mm.strftime('%Y-%m-%d')
+    
+    snap = capture_current_snapshot()
+    if snap.get("result2D") not in ["--", None, ""]:
+        tick_entry = {
+            "time": time_str,
+            "set": snap.get("rawSet"),
+            "val": snap.get("rawVal"),
+            "result2D": snap.get("result2D"),
+            "setFormatted": snap.get("setFormatted"),
+            "valFormatted": snap.get("valFormatted")
+        }
+        # Firebase me `/live_ticks/2026-09-26/11:00:00` node save karega
+        save_firebase_node(f"live_ticks/{date_str}/{time_str.replace(':', '_')}", tick_entry)
+
+# ==========================================
+# SLOT LOCKING FROM LIVE LOGS
+# ==========================================
 def capture_slot(slot_key):
     now_mm = datetime.now(MM_TZ)
     if now_mm.weekday() in [5, 6]:
@@ -121,64 +160,69 @@ def capture_slot(slot_key):
         print(f"[{slot_key}] Already locked. Skipping.")
         return
 
-    # EXACT SECOND DATA CAPTURE LOGIC
-    # Scheduler exact target time (e.g. 11:00:00) par trigger karega
-    start_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
-    print(f"[{slot_key}] Triggered exactly at {start_time}. Fetching snapshot...")
+    # Slot lock karne ke liye 10 sec wait karein taaki logs upload ho sakein
+    time.sleep(10)
 
+    target_times = {
+        "11": "11:00:00",
+        "12": "12:01:00",
+        "15": "15:00:00",
+        "16": "16:30:00"
+    }
+    
+    target_time_str = target_times.get(slot_key)
+    date_str = now_mm.strftime('%Y-%m-%d')
+    
+    ticks_data = get_firebase_node(f"live_ticks/{date_str}") or {}
+    
     selected_snapshot = None
     winning_time = None
 
-    # Exact :00 sec se lekar agle 10-15 seconds tak continuous poll (0.5 sec pause for speed)
-    for _ in range(20):
-        current_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
-        snap = capture_current_snapshot()
-        res = snap.get("result2D")
+    if ticks_data:
+        # Search for exact or earliest time after target time
+        valid_keys = sorted([k for k in ticks_data.keys() if k.replace('_', ':') >= target_time_str])
         
-        if res not in ["--", None, ""]:
-            selected_snapshot = snap
-            winning_time = current_time
-            break
-        
-        time.sleep(0.5)
+        if valid_keys:
+            best_key = valid_keys[0] # SABSE PEHLA valid timestamp
+            raw_item = ticks_data[best_key]
+            selected_snapshot = {
+                "result2D": raw_item["result2D"],
+                "setFormatted": raw_item["setFormatted"],
+                "valFormatted": raw_item["valFormatted"]
+            }
+            winning_time = raw_item["time"]
 
-    # Save selected result to Firebase
+    # Lock Data to Firebase
     if selected_snapshot:
         history_data = get_firebase_node("history_2d") or {}
         history_data[slot_key] = selected_snapshot
         save_firebase_node("history_2d", history_data)
 
         if slot_key in ["12", "16"]:
-            date_key = now_mm.strftime('%Y-%m-%d')
             calendar_records = get_firebase_node("calendar_history") or {}
-
-            if date_key not in calendar_records:
-                calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
+            if date_str not in calendar_records:
+                calendar_records[date_str] = {"res12": "--", "res16": "--", "closed": False}
 
             if slot_key == "12":
-                calendar_records[date_key]["res12"] = selected_snapshot["result2D"]
+                calendar_records[date_str]["res12"] = selected_snapshot["result2D"]
             elif slot_key == "16":
-                calendar_records[date_key]["res16"] = selected_snapshot["result2D"]
+                calendar_records[date_str]["res16"] = selected_snapshot["result2D"]
 
             save_firebase_node("calendar_history", calendar_records)
 
-        print(f"[{slot_key}] LOCKED EXACT RESULT: '{selected_snapshot['result2D']}' captured at {winning_time}")
+        print(f"[{slot_key}] LOCKED FROM LIVE LOGS: '{selected_snapshot['result2D']}' at {winning_time}")
     else:
-        print(f"[{slot_key}] No valid result captured at {start_time}.")
+        print(f"[{slot_key}] No log data found to lock.")
 
-def is_market_open():
-    now_mm = datetime.now(MM_TZ)
-    if now_mm.weekday() in [5, 6]:
-        return False
-
-    time_mins = now_mm.hour * 60 + now_mm.minute
-    session1 = 570 <= time_mins < 721
-    session2 = 810 <= time_mins < 990
-    return session1 or session2
-
+# ==========================================
+# SCHEDULER CONFIGURATION
+# ==========================================
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Target exact timings
+# Har 1 second me live ticker log chalega
+scheduler.add_job(run_live_logger, 'interval', seconds=1)
+
+# Exact Target Slots Trigger
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
@@ -188,9 +232,23 @@ scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute
 
 scheduler.start()
 
+# ==========================================
+# API ENDPOINTS
+# ==========================================
 @app.route('/', methods=['GET'])
 def home():
     return jsonify({"status": "Backend Active", "database": "Firebase Connected"})
+
+# NAYA API ENDPOINT: Frontend par Screenshot jaisi live table dikhane ke liye
+@app.route('/live-logs', methods=['GET'])
+def get_live_logs():
+    now_mm = datetime.now(MM_TZ)
+    date_str = now_mm.strftime('%Y-%m-%d')
+    ticks_data = get_firebase_node(f"live_ticks/{date_str}") or {}
+    
+    # Time descending order me sort (Latest upar)
+    sorted_logs = sorted(ticks_data.values(), key=lambda x: x['time'], reverse=True)
+    return jsonify({"status": "success", "logs": sorted_logs})
 
 @app.route('/live-2d', methods=['GET'])
 def get_live_set_data():
