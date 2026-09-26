@@ -219,8 +219,8 @@ def capture_slot(slot_key):
 # ==========================================
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Har 1 second me live ticker log chalega
-scheduler.add_job(run_live_logger, 'interval', seconds=1)
+# Har 3 second me live ticker log chalega
+scheduler.add_job(run_live_logger, 'interval', seconds=3)
 
 # Exact Target Slots Trigger
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
