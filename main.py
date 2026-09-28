@@ -17,9 +17,12 @@ FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://aungkyaw2d-f6faf-defau
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
 
+# Global cache fast response ke liye
+cached_live_data = {"data": [], "timestamp": None}
+
 def get_firebase_node(node_name):
     try:
-        res = requests.get(f"{FIREBASE_URL}{node_name}.json", timeout=5)
+        res = requests.get(f"{FIREBASE_URL}{node_name}.json", timeout=3)
         if res.status_code == 200 and res.json():
             return res.json()
     except Exception as e:
@@ -28,7 +31,7 @@ def get_firebase_node(node_name):
 
 def save_firebase_node(node_name, data):
     try:
-        requests.put(f"{FIREBASE_URL}{node_name}.json", json=data, timeout=5)
+        requests.put(f"{FIREBASE_URL}{node_name}.json", json=data, timeout=3)
     except Exception as e:
         print(f"Firebase save error ({node_name}):", e)
 
@@ -36,7 +39,7 @@ def fetch_set_live_data():
     url = "https://www.set.or.th/th/home"
     headers = {"User-Agent": "Mozilla/5.0"}
     try:
-        response = requests.get(url, headers=headers, timeout=5)
+        response = requests.get(url, headers=headers, timeout=3)
         soup = BeautifulSoup(response.text, 'html.parser')
         rows = soup.find_all('tr')
         stock_data = []
@@ -53,10 +56,15 @@ def fetch_set_live_data():
                 })
         filtered = [d for d in stock_data if "SET" in d["Symbol"]]
         if filtered:
+            global cached_live_data
+            cached_live_data = {
+                "data": filtered,
+                "timestamp": datetime.now(MM_TZ).strftime('%Y-%m-%d %H:%M:%S')
+            }
             return filtered
     except Exception as e:
         print("Scraper Error:", e)
-    return []
+    return cached_live_data.get("data", [])
 
 def format_2d(set_val, val):
     try:
@@ -123,13 +131,11 @@ def capture_slot(slot_key):
 
     print(f"[{slot_key}] Collecting buffer data from :00 to :15 seconds...")
 
-    # STEP 1: Pehle target minute ke baseline/purane snapshot ko detect karo taaki filtering ho sake
     initial_snapshot = capture_current_snapshot()
     initial_res = initial_snapshot.get("result2D")
 
     collected_buffer = []
 
-    # STEP 2: Target minute se :15 sec tak poora buffer collect karo
     for _ in range(15):
         current_dt = datetime.now(MM_TZ)
         capture_time = current_dt.strftime('%H:%M:%S')
@@ -141,23 +147,17 @@ def capture_slot(slot_key):
         })
         time.sleep(1.0)
 
-    # STEP 3: Buffer me sequential search (:00 -> :01 -> :02 -> ... -> :15)
-    # Check karo ki kis SABSE PEHLE second par NEW/UPDATED result aaya hai
     selected_snapshot = None
     winning_time = None
 
     for item in collected_buffer:
         res = item["snapshot"].get("result2D")
-        
-        # Valid numerical data hona chahiye
         if res not in ["--", None, ""]:
-            # Agar value target minute ke start hone par update hui hai (Purane pre-minute data se alag)
             if res != initial_res:
                 selected_snapshot = item["snapshot"]
                 winning_time = item["timestamp"]
-                break # SABSE PEHLA naya value milte hi loop STOP
+                break
 
-    # Fallback: Agar market me exact :00 par hi value fix thi aur Change nahi hui, tab bhi pehla valid snapshot lock karo
     if not selected_snapshot and collected_buffer:
         for item in collected_buffer:
             res = item["snapshot"].get("result2D")
@@ -166,7 +166,6 @@ def capture_slot(slot_key):
                 winning_time = item["timestamp"]
                 break
 
-    # STEP 4: Lock and Save selected result to Firebase
     if selected_snapshot:
         history_data = get_firebase_node("history_2d") or {}
         history_data[slot_key] = selected_snapshot
@@ -200,13 +199,40 @@ def is_market_open():
     session2 = 810 <= time_mins < 990
     return session1 or session2
 
+def high_frequency_scrape_job():
+    """Triggered every second during exact 20-second result windows"""
+    now_mm = datetime.now(MM_TZ)
+    if now_mm.weekday() in [5, 6]:
+        return
+    fetch_set_live_data()
+
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Exact :00 second par trigger karega
+# Slot Locks
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
+
+# =========================================================
+# EXACT 20-SECOND HIGH FREQUENCY POLLING (1 Sec Interval)
+# =========================================================
+
+# Slot 1: Morning 11:00 AM (10:59:50 AM to 11:00:10 AM)
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=10, minute=59, second='50-59')
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=11, minute=0, second='0-10')
+
+# Slot 2: Morning 12:01 PM (12:00:50 PM to 12:01:10 PM)
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=12, minute=0, second='50-59')
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=12, minute=1, second='0-10')
+
+# Slot 3: Evening 03:00 PM (02:59:50 PM to 03:00:10 PM)
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=14, minute=59, second='50-59')
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=15, minute=0, second='0-10')
+
+# Slot 4: Evening 04:30 PM (04:29:50 PM to 04:30:10 PM)
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=16, minute=29, second='50-59')
+scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=16, minute=30, second='0-10')
 
 scheduler.add_job(check_day_reset, 'cron', day_of_week='mon-fri', hour=9, minute=0, second=0)
 
@@ -223,7 +249,7 @@ def get_live_set_data():
     now_mm = datetime.now(MM_TZ)
     
     if market_active:
-        data = fetch_set_live_data()
+        data = cached_live_data.get("data") or fetch_set_live_data()
         return jsonify({
             "status": "success", 
             "live": True, 
