@@ -17,8 +17,9 @@ FIREBASE_URL = os.environ.get("FIREBASE_DB_URL", "https://aungkyaw2d-f6faf-defau
 if not FIREBASE_URL.endswith('/'):
     FIREBASE_URL += '/'
 
-# Global cache fast response ke liye
+# Global Cache Variables
 cached_live_data = {"data": [], "timestamp": None}
+last_fetch_timestamp = 0
 
 def get_firebase_node(node_name):
     try:
@@ -35,35 +36,44 @@ def save_firebase_node(node_name, data):
     except Exception as e:
         print(f"Firebase save error ({node_name}):", e)
 
-def fetch_set_live_data():
+def fetch_set_live_data(force=False):
+    global cached_live_data, last_fetch_timestamp
+    current_time = time.time()
+
+    # Agar force=False hai aur cache 2 second se kam purana hai, to cache return karo
+    if not force and cached_live_data["data"] and (current_time - last_fetch_timestamp < 2):
+        return cached_live_data["data"]
+
     url = "https://www.set.or.th/th/home"
-    headers = {"User-Agent": "Mozilla/5.0"}
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"}
     try:
         response = requests.get(url, headers=headers, timeout=3)
-        soup = BeautifulSoup(response.text, 'html.parser')
-        rows = soup.find_all('tr')
-        stock_data = []
-        for row in rows:
-            cols = row.find_all(['td', 'th'])
-            cols_text = [c.text.strip() for c in cols]
-            if len(cols_text) >= 5:
-                stock_data.append({
-                    "Symbol": cols_text[0],
-                    "Last": cols_text[1],
-                    "Change": cols_text[2],
-                    "Volume": cols_text[3],
-                    "Value": cols_text[4]
-                })
-        filtered = [d for d in stock_data if "SET" in d["Symbol"]]
-        if filtered:
-            global cached_live_data
-            cached_live_data = {
-                "data": filtered,
-                "timestamp": datetime.now(MM_TZ).strftime('%Y-%m-%d %H:%M:%S')
-            }
-            return filtered
+        if response.status_code == 200:
+            soup = BeautifulSoup(response.text, 'html.parser')
+            rows = soup.find_all('tr')
+            stock_data = []
+            for row in rows:
+                cols = row.find_all(['td', 'th'])
+                cols_text = [c.text.strip() for c in cols]
+                if len(cols_text) >= 5:
+                    stock_data.append({
+                        "Symbol": cols_text[0],
+                        "Last": cols_text[1],
+                        "Change": cols_text[2],
+                        "Volume": cols_text[3],
+                        "Value": cols_text[4]
+                    })
+            filtered = [d for d in stock_data if "SET" in d["Symbol"]]
+            if filtered:
+                cached_live_data = {
+                    "data": filtered,
+                    "timestamp": datetime.now(MM_TZ).strftime('%Y-%m-%d %H:%M:%S')
+                }
+                last_fetch_timestamp = current_time
+                return filtered
     except Exception as e:
         print("Scraper Error:", e)
+        
     return cached_live_data.get("data", [])
 
 def format_2d(set_val, val):
@@ -95,7 +105,7 @@ def format_2d(set_val, val):
         return {"result2D": "--", "setFormatted": "--", "valFormatted": "--"}
 
 def capture_current_snapshot():
-    live_data = fetch_set_live_data()
+    live_data = fetch_set_live_data(force=True)
     if live_data:
         set_item = live_data[0]
         return format_2d(set_item.get('Last', ''), set_item.get('Value', ''))
@@ -129,7 +139,7 @@ def capture_slot(slot_key):
         print(f"[{slot_key}] Already locked. Skipping.")
         return
 
-    print(f"[{slot_key}] Collecting buffer data from :00 to :15 seconds...")
+    print(f"[{slot_key}] Collecting buffer data...")
 
     initial_snapshot = capture_current_snapshot()
     initial_res = initial_snapshot.get("result2D")
@@ -185,9 +195,7 @@ def capture_slot(slot_key):
 
             save_firebase_node("calendar_history", calendar_records)
 
-        print(f"[{slot_key}] SUCCESS LOCKED EARLIEST VALID RESULT: '{selected_snapshot['result2D']}' at {winning_time}")
-    else:
-        print(f"[{slot_key}] No valid result captured in window.")
+        print(f"[{slot_key}] SUCCESS LOCKED RESULT: '{selected_snapshot['result2D']}' at {winning_time}")
 
 def is_market_open():
     now_mm = datetime.now(MM_TZ)
@@ -195,16 +203,23 @@ def is_market_open():
         return False
 
     time_mins = now_mm.hour * 60 + now_mm.minute
-    session1 = 570 <= time_mins < 721
-    session2 = 810 <= time_mins < 990
+    session1 = 570 <= time_mins < 721   # 9:30 AM to 12:01 PM
+    session2 = 810 <= time_mins < 990   # 1:30 PM to 4:30 PM
     return session1 or session2
 
+# 🟢 BACKGROUND JOBS FOR DYNAMIC REFRESH
+
+def normal_3sec_background_job():
+    """Market open ke dauran har 3 sec me background refresh karega"""
+    if is_market_open():
+        fetch_set_live_data(force=True)
+
 def high_frequency_scrape_job():
-    """Triggered every second during exact 20-second result windows"""
+    """Result window par har 1 second me call hoga"""
     now_mm = datetime.now(MM_TZ)
     if now_mm.weekday() in [5, 6]:
         return
-    fetch_set_live_data()
+    fetch_set_live_data(force=True)
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
@@ -214,10 +229,10 @@ scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
 
-# =========================================================
-# EXACT 20-SECOND HIGH FREQUENCY POLLING (1 Sec Interval)
-# =========================================================
+# ⚡ BAKI SAMAY HAR 3 SECOND ME BACKGROUND REFRESH (Market Hours)
+scheduler.add_job(normal_3sec_background_job, 'interval', seconds=3)
 
+# ⚡ KAL WAALA 1-SECOND HIGH FREQUENCY POLLING (20 Sec Windows)
 # Slot 1: Morning 11:00 AM (10:59:50 AM to 11:00:10 AM)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=10, minute=59, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=11, minute=0, second='0-10')
@@ -249,11 +264,12 @@ def get_live_set_data():
     now_mm = datetime.now(MM_TZ)
     
     if market_active:
-        data = cached_live_data.get("data") or fetch_set_live_data()
+        data = fetch_set_live_data()
+        live_timestamp = cached_live_data.get("timestamp") or now_mm.strftime('%Y-%m-%d %H:%M:%S')
         return jsonify({
             "status": "success", 
             "live": True, 
-            "time": now_mm.strftime('%Y-%m-%d %H:%M:%S'),
+            "time": live_timestamp,
             "data": data
         })
     else:
