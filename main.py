@@ -40,7 +40,6 @@ def fetch_set_live_data(force=False):
     global cached_live_data, last_fetch_timestamp
     current_time = time.time()
 
-    # Agar force=False hai aur cache 2 second se kam purana hai, to cache return karo
     if not force and cached_live_data["data"] and (current_time - last_fetch_timestamp < 2):
         return cached_live_data["data"]
 
@@ -139,44 +138,22 @@ def capture_slot(slot_key):
         print(f"[{slot_key}] Already locked. Skipping.")
         return
 
-    print(f"[{slot_key}] Collecting buffer data...")
+    print(f"[{slot_key}] Capturing exact slot result...")
 
-    initial_snapshot = capture_current_snapshot()
-    initial_res = initial_snapshot.get("result2D")
+    # Exact slot time ka immediate fresh fetch
+    selected_snapshot = capture_current_snapshot()
+    winning_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
 
-    collected_buffer = []
-
-    for _ in range(15):
-        current_dt = datetime.now(MM_TZ)
-        capture_time = current_dt.strftime('%H:%M:%S')
-        snap = capture_current_snapshot()
-        
-        collected_buffer.append({
-            "timestamp": capture_time,
-            "snapshot": snap
-        })
-        time.sleep(1.0)
-
-    selected_snapshot = None
-    winning_time = None
-
-    for item in collected_buffer:
-        res = item["snapshot"].get("result2D")
-        if res not in ["--", None, ""]:
-            if res != initial_res:
-                selected_snapshot = item["snapshot"]
-                winning_time = item["timestamp"]
+    # Backup retry agar Pehla fetch fail/empty ho gaya ho
+    if selected_snapshot.get("result2D") in ["--", None, ""]:
+        for _ in range(5):
+            time.sleep(1.0)
+            selected_snapshot = capture_current_snapshot()
+            winning_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
+            if selected_snapshot.get("result2D") not in ["--", None, ""]:
                 break
 
-    if not selected_snapshot and collected_buffer:
-        for item in collected_buffer:
-            res = item["snapshot"].get("result2D")
-            if res not in ["--", None, ""]:
-                selected_snapshot = item["snapshot"]
-                winning_time = item["timestamp"]
-                break
-
-    if selected_snapshot:
+    if selected_snapshot and selected_snapshot.get("result2D") not in ["--", None, ""]:
         history_data = get_firebase_node("history_2d") or {}
         history_data[slot_key] = selected_snapshot
         save_firebase_node("history_2d", history_data)
@@ -207,15 +184,11 @@ def is_market_open():
     session2 = 810 <= time_mins < 990   # 1:30 PM to 4:30 PM
     return session1 or session2
 
-# 🟢 BACKGROUND JOBS FOR DYNAMIC REFRESH
-
 def normal_3sec_background_job():
-    """Market open ke dauran har 3 sec me background refresh karega"""
     if is_market_open():
         fetch_set_live_data(force=True)
 
 def high_frequency_scrape_job():
-    """Result window par har 1 second me call hoga"""
     now_mm = datetime.now(MM_TZ)
     if now_mm.weekday() in [5, 6]:
         return
@@ -223,29 +196,25 @@ def high_frequency_scrape_job():
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Slot Locks
+# Exact Time Slot Lock Jobs
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
 
-# ⚡ BAKI SAMAY HAR 3 SECOND ME BACKGROUND REFRESH (Market Hours)
+# Background Refresh Jobs
 scheduler.add_job(normal_3sec_background_job, 'interval', seconds=3)
 
-# ⚡ KAL WAALA 1-SECOND HIGH FREQUENCY POLLING (20 Sec Windows)
-# Slot 1: Morning 11:00 AM (10:59:50 AM to 11:00:10 AM)
+# High Frequency Polling Windows
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=10, minute=59, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=11, minute=0, second='0-10')
 
-# Slot 2: Morning 12:01 PM (12:00:50 PM to 12:01:10 PM)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=12, minute=0, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=12, minute=1, second='0-10')
 
-# Slot 3: Evening 03:00 PM (02:59:50 PM to 03:00:10 PM)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=14, minute=59, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=15, minute=0, second='0-10')
 
-# Slot 4: Evening 04:30 PM (04:29:50 PM to 04:30:10 PM)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=16, minute=29, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=16, minute=30, second='0-10')
 
