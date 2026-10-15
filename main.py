@@ -140,7 +140,6 @@ def capture_slot(slot_key):
 
     print(f"[{slot_key}] Capturing exact slot result...")
 
-    # Market open hai ya closed check karne ke liye fresh live data lo
     live_data = fetch_set_live_data(force=True)
     is_closed = True
     if live_data:
@@ -154,7 +153,6 @@ def capture_slot(slot_key):
         calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
 
     if is_closed:
-        # ❌ Market closed hone par ❌ save karo
         closed_snapshot = {"result2D": "❌", "setFormatted": "Closed", "valFormatted": "Closed"}
         history_data = get_firebase_node("history_2d") or {}
         history_data[slot_key] = closed_snapshot
@@ -165,7 +163,6 @@ def capture_slot(slot_key):
         print(f"[{slot_key}] Market was CLOSED. Saved '❌'.")
         return
 
-    # Agar market open hai toh normal snapshot lo
     selected_snapshot = capture_current_snapshot()
     winning_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
 
@@ -206,16 +203,13 @@ def high_frequency_scrape_job():
 
 scheduler = BackgroundScheduler(timezone=MM_TZ)
 
-# Exact Time Slot Lock Jobs
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=11, minute=0, second=0, args=['11'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=12, minute=1, second=0, args=['12'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=15, minute=0, second=0, args=['15'])
 scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=30, second=0, args=['16'])
 
-# Background Refresh Jobs
 scheduler.add_job(normal_3sec_background_job, 'interval', seconds=3)
 
-# High Frequency Polling Windows (1-second fast checks for all 4 slots)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=10, minute=59, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=11, minute=0, second='0-10')
 
@@ -242,25 +236,28 @@ def get_live_set_data():
     history = get_firebase_node("history_2d") or {}
     now_mm = datetime.now(MM_TZ)
     
-    if market_active:
-        data = fetch_set_live_data()
+    # Check if today's market has valid live data or if it's a closed/holiday
+    live_data = fetch_set_live_data()
+    is_today_closed = True
+    if live_data:
+        set_item = live_data[0]
+        if set_item.get('Last') and set_item.get('Last') != "--":
+            is_today_closed = False
+
+    # Agar market active hai LEKIN website par data closed/dash hai (matlab holiday hai)
+    if market_active and not is_today_closed:
         live_timestamp = cached_live_data.get("timestamp") or now_mm.strftime('%Y-%m-%d %H:%M:%S')
         return jsonify({
             "status": "success", 
             "live": True, 
             "time": live_timestamp,
-            "data": data
+            "data": live_data
         })
     else:
+        # Market closed hai ya holiday hai -> Aakhri frozen/locked data dikhao
         time_mins = now_mm.hour * 60 + now_mm.minute
-        frozen_snapshot = None
-        
-        if 721 <= time_mins < 810:
-            frozen_snapshot = history.get("12")
-            pause_time = f"{history.get('date', now_mm.strftime('%Y-%m-%d'))} 12:01:00"
-        else:
-            frozen_snapshot = history.get("16") or history.get("15") or history.get("12") or history.get("11")
-            pause_time = f"{history.get('date', now_mm.strftime('%Y-%m-%d'))} 16:30:00"
+        frozen_snapshot = history.get("16") or history.get("15") or history.get("12") or history.get("11")
+        pause_time = f"{history.get('date', now_mm.strftime('%Y-%m-%d'))} 16:30:00"
 
         return jsonify({
             "status": "success",
