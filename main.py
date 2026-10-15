@@ -140,18 +140,34 @@ def capture_slot(slot_key):
 
     print(f"[{slot_key}] Capturing exact slot result...")
 
-    # Exact slot time ka immediate fresh fetch
+    # Market open hai ya closed check karne ke liye fresh live data lo
+    live_data = fetch_set_live_data(force=True)
+    is_closed = True
+    if live_data:
+        set_item = live_data[0]
+        if set_item.get('Last') and set_item.get('Last') != "--":
+            is_closed = False
+
+    date_key = now_mm.strftime('%Y-%m-%d')
+    calendar_records = get_firebase_node("calendar_history") or {}
+    if date_key not in calendar_records:
+        calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
+
+    if is_closed:
+        # ❌ Agar market closed hai toh ❌ save karo
+        closed_snapshot = {"result2D": "❌", "setFormatted": "Closed", "valFormatted": "Closed"}
+        history_data = get_firebase_node("history_2d") or {}
+        history_data[slot_key] = closed_snapshot
+        save_firebase_node("history_2d", history_data)
+
+        calendar_records[date_key]["closed"] = True
+        save_firebase_node("calendar_history", calendar_records)
+        print(f"[{slot_key}] Market was CLOSED. Saved '❌'.")
+        return
+
+    # Agar market open hai toh normal snapshot lo
     selected_snapshot = capture_current_snapshot()
     winning_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
-
-    # Backup retry agar Pehla fetch fail/empty ho gaya ho
-    if selected_snapshot.get("result2D") in ["--", None, ""]:
-        for _ in range(5):
-            time.sleep(1.0)
-            selected_snapshot = capture_current_snapshot()
-            winning_time = datetime.now(MM_TZ).strftime('%H:%M:%S')
-            if selected_snapshot.get("result2D") not in ["--", None, ""]:
-                break
 
     if selected_snapshot and selected_snapshot.get("result2D") not in ["--", None, ""]:
         history_data = get_firebase_node("history_2d") or {}
@@ -159,12 +175,6 @@ def capture_slot(slot_key):
         save_firebase_node("history_2d", history_data)
 
         if slot_key in ["12", "16"]:
-            date_key = now_mm.strftime('%Y-%m-%d')
-            calendar_records = get_firebase_node("calendar_history") or {}
-
-            if date_key not in calendar_records:
-                calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
-
             if slot_key == "12":
                 calendar_records[date_key]["res12"] = selected_snapshot["result2D"]
             elif slot_key == "16":
@@ -205,7 +215,7 @@ scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=3
 # Background Refresh Jobs
 scheduler.add_job(normal_3sec_background_job, 'interval', seconds=3)
 
-# High Frequency Polling Windows
+# High Frequency Polling Windows (1-second fast checks)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=10, minute=59, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=11, minute=0, second='0-10')
 
@@ -259,6 +269,7 @@ def get_live_set_data():
             "frozenData": frozen_snapshot
         })
 
+@app.pyroute if False else history_routes:
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
     history_data = get_firebase_node("history_2d") or {}
