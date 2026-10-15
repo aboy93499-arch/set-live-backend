@@ -154,7 +154,7 @@ def capture_slot(slot_key):
         calendar_records[date_key] = {"res12": "--", "res16": "--", "closed": False}
 
     if is_closed:
-        # ❌ Agar market closed hai toh ❌ save karo
+        # ❌ Market closed hone par ❌ save karo
         closed_snapshot = {"result2D": "❌", "setFormatted": "Closed", "valFormatted": "Closed"}
         history_data = get_firebase_node("history_2d") or {}
         history_data[slot_key] = closed_snapshot
@@ -215,7 +215,7 @@ scheduler.add_job(capture_slot, 'cron', day_of_week='mon-fri', hour=16, minute=3
 # Background Refresh Jobs
 scheduler.add_job(normal_3sec_background_job, 'interval', seconds=3)
 
-# High Frequency Polling Windows (1-second fast checks)
+# High Frequency Polling Windows (1-second fast checks for all 4 slots)
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=10, minute=59, second='50-59')
 scheduler.add_job(high_frequency_scrape_job, 'cron', day_of_week='mon-fri', hour=11, minute=0, second='0-10')
 
@@ -269,7 +269,6 @@ def get_live_set_data():
             "frozenData": frozen_snapshot
         })
 
-@app.pyroute if False else history_routes:
 @app.route('/history-2d', methods=['GET'])
 def get_history_2d():
     history_data = get_firebase_node("history_2d") or {}
